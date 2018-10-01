@@ -1,0 +1,211 @@
+module blink(clk, MIDI, rst, out, LED_out, dff_out, and_out/*, mux_out*/);
+    // inputs
+    input clk;
+    input MIDI;
+    input rst;
+    // outputs
+    output[7:0] LED_out;  
+    output[3:0] out;
+    output[3:0] dff_out; 
+    output[3:0] and_out;
+    //output[3:0] mux_out; 
+    // regs
+    reg[9:0] cnt = 10'b0;
+    reg[3:0] state;
+    reg[3:0] state_nxt;
+    reg flag = 1'b0;
+    // wires
+    wire[3:0] and_out;
+    wire[3:0] mux_out;
+    wire[3:0] dff_out;
+    wire[9:0] cnt_nxt;
+	wire[1:0] is_on;
+    // assigns
+    assign cnt_nxt = cnt + 1'b1;
+    assign out = state;
+	// Select Lines for Muxes
+	assign and_out[0] = ((!state[3])&(!state[2]))&((state[1])&(!state[0])); // state 2
+	assign and_out[1] = ((!state[3])&(state[2]))&((!state[1])&(!state[0])); // state 4
+	assign and_out[2] = ((state[3])&(!state[2]))&((!state[1])&(!state[0])); // state 8
+	assign and_out[3] = ((state[3])&(!state[2]))&((state[1])&(!state[0]));  // state 10
+	// Muxes
+	mux M0(.in2(MIDI), .in1(dff_out[0]), .s(and_out[0]), .q(mux_out[0]));
+	mux M1(.in2(MIDI), .in1(dff_out[1]), .s(and_out[1]), .q(mux_out[1]));
+	mux M2(.in2(MIDI), .in1(dff_out[2]), .s(and_out[2]), .q(mux_out[2]));
+	mux M3(.in2(MIDI), .in1(dff_out[3]), .s(and_out[3]), .q(mux_out[3]));
+	// Flip Flops
+	double_dff D0(.clk(clk), .d(mux_out[0]), .q(dff_out[0]));
+	double_dff D1(.clk(clk), .d(mux_out[1]), .q(dff_out[1]));
+	double_dff D2(.clk(clk), .d(mux_out[2]), .q(dff_out[2]));
+	double_dff D3(.clk(clk), .d(mux_out[3]), .q(dff_out[3]));
+	
+	
+   
+    always @(posedge clk)
+        begin
+            if(rst)	
+				begin
+					state <= 4'b0000;
+					cnt <= 10'b0;
+				end
+			else	
+				begin
+					state <= state_nxt;
+					cnt <= cnt_nxt;
+				end
+			//-----------------------------------------------------	
+			if((state == 4'b0001) || (state == 4'b0111)) // If in state 1 or 7
+				begin
+					if(!flag) // And if flag is 0
+						begin
+							cnt <= 10'b0; // reset cnt and raise flag
+							flag <= 1'b1;
+						end
+				end
+			//-----------------------------------------------------				
+            if((state == 4'b0000) || (state == 4'b0110)) // If idle in state 0 or 6, lower flag
+                begin
+                   flag <= 1'b0;
+                   cnt <= 10'b0;
+                end
+			
+        end
+ 
+    //          _________   _________   ___________
+    //                   _XX         _XX
+    //          |       |   idle
+    //                  | |     start bit
+    //                    | |       data
+   
+    always @(*)
+        begin
+            case(state)
+           
+            // State 0: Idle until start bit
+            4'b0000:
+                begin
+                    if(MIDI == 1'b0) 	state_nxt = 4'b0001; // Start bit
+					else   				state_nxt = 4'b0000; // Still idle
+				end
+		   
+			// State 1: Pause for 48 us
+            4'b0001:
+                begin
+                    if(cnt == 10'b11000000)		state_nxt = 4'b0010; // 192 cycles (48 us)
+                    else						state_nxt = 4'b0001; // wait 
+                end
+           
+            // State 2: Update ddff0 and proceed to State 3
+            4'b0010:
+                begin
+					// sequential logic goes into pos(edge) than goes to the next state immediately
+					//and_out[0] = !state[3] + !state[2] + state[1] + !state[0]; // and gate 
+					//mux( MIDI,d_ff_out, and_out) // have mux module but not a way to put it here :( 
+					
+					state_nxt = 4'b0011; // goes to state 3
+                   
+                end
+              
+            // State 3: wait 32us from 48 us
+			4'b0011:
+				begin
+
+					if(cnt == 10'b101000000)	state_nxt = 4'b0100; // 320 cycles (32 more us)
+					else						state_nxt = 4'b0011; // wait
+				end
+			// State 4: Update ddff1 and proceed to State 5
+			4'b0100:
+				begin
+					//sequential logic shinangaigins
+					//and_out[1] = !state[3] + state[2] + !state[1] + !state[0]; // and gate 
+					//mux( MIDI,d_ff_out, and_out) // have mux module but not a way to put it here :( 
+					
+					state_nxt = 4'b0101; // goes to state 5
+				end
+			// State 5: Wait 32 us for stop bit
+			4'b0101:
+				begin
+					if(cnt == 10'b111000000)	state_nxt = 4'b0110; // 448 cycles (32 more us)
+					else						state_nxt = 4'b0101; // wait
+				end
+			// State 6: Wait for start bit for 2nd frame
+			4'b0110:
+				begin
+					if(MIDI == 0)		state_nxt = 4'b0111; // Start bit
+                    else 				state_nxt = 4'b0110; // Still idle
+				end
+			// State 7: Wait 48us again
+			4'b0111:
+				begin
+					if(cnt == 10'b11000000)		state_nxt = 4'b1000; // 192 cycles (48 us)
+					else						state_nxt = 4'b0111; // wait 
+				end
+			// State 8: flip-flop 2 changes
+			4'b1000:
+				begin
+					// sequential logic sets flip-flops and muxs then state changes immediately 
+					state_nxt = 4'b1001;
+				end
+			// State 9: wait 32 more us
+			4'b1001:
+				begin
+					if(cnt == 10'b101000000)	state_nxt = 4'b1010; // 320 cycles (32 more us)
+					else						state_nxt = 4'b1001; // wait
+				end
+			// State 10: Flip-Flop 3 changes
+			4'b1010:
+				begin
+					//sequential logic sets flip-flops and muxs then state changes immediately
+					state_nxt = 4'b1011;// goes to state 10
+				end
+				// State 11
+			4'b1011:
+				begin
+					// logic that puts dff's onto LED's
+					state_nxt = 4'b0000;
+				end		
+					
+            //  ...
+               
+            default:
+                state_nxt = 4'b0000;
+            endcase
+        end
+endmodule
+
+//============================================================
+
+module double_dff(clk, d, q);
+	input clk, d;
+	output q;
+	reg w, q;
+	
+	//always @(posedge clk) w = d;
+	//always @(posedge clk) q = w;
+	dff x1(.d(d), .q(w), .clk(clk));
+	dff x2(.d(w), .q(q), .clk(clk));
+endmodule
+
+//============================================================
+
+module dff(clk, d, q);
+	input clk, d;
+	output q;
+	reg q;
+	always @(posedge clk) q = d;
+endmodule
+
+//============================================================
+
+module mux(in1, in2, s, q);
+	input in1, in2, s;
+	output q;
+	
+	not (s_n, s);
+	wire w0, w1;
+	and (w0, in1, s_n);
+	and (w1, in2, s);
+	or (q, w0, w1);
+endmodule
+
+//============================================================
